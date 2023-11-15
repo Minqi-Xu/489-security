@@ -1,0 +1,227 @@
+Part 2 for Assignment 3
+
+
+To handle ./portal.sh proxy_register <uid>:
+Firstly, get the uid, then verify the uid, check whether the uid is in the allowed set of users (valid_usr_name) and check whether the uid is already been registered. If the key type and uid are both valid to register, then write the info of this uid into a file called allowed_signers, which will be used later during login validation.
+
+To handle ./portal,sh proxy_login <uid>:
+Firstly, get the uid, then record the current time. And do the checking on uid, check if it is in allowed set of users and whether it is registered. If tests passes, then we load the message which is the signature and decode it. Since in portal.sh, the signature is generated based on time with user's private key. To verify the signature, we will tolerate the time prior to the current time in a time window of length time_window. As long as there exists one valid signatures (same time, and correct key) in the time window, then 200 will be returned to the client. Note that the method of verifying signature referenced https://imzye.com/DevSecOps/signature-with-ssh-keys/, the returncode of it will be 0 in this case only when the time matches. So we use a loop to brute force the time in the time window.
+
+Also note that the hyper-parameter time_window controls the size of time window stated above, if the response of a valid login returns non-200 error code, please try to change the time_window into greater one.
+
+Also note that there are some hard-coded part, the domain is fixed to s3 according to portal.sh
+
+
+The rest part is the copy of my source code (just in case needed):
+# Python 3 server example
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
+import time
+import os
+import subprocess
+
+hostName = "0.0.0.0"
+serverPort = 8000
+usrs = []
+attack_lst = []
+valid_usr_name = ["test1", "test2", "test3", "test4", "test5"]
+time_window = 3 # changable, controls the validity period of the signature, unit: second, has to be int
+
+class Server(BaseHTTPRequestHandler):
+  def do_POST(self):
+    # get path components, for register and login path_arr[0] = "", path_arr[1] = "register" or "login", and path_arr[2] = <uid>
+    #                      for attack, path_arr[0] = "", path_arr[1] = "attack"
+    # print("self.path = ", self.path)
+    path_arr = self.path.split("/")
+    # print("header")
+    # print(self.headers)
+   
+    if len(path_arr) > 3:
+      self.send_response(400)
+      self.end_headers()
+      err_str = "Bad request 400: invalid path"
+      self.wfile.write(err_str.encode("ascii"))
+      print(err_str)
+      return
+    
+    action = path_arr[1]
+    print("action: ", action)
+    
+    if action == "attack":
+      print("attack")
+      attack_lst = []
+      # load message
+      length = self.headers.get('content-length')
+      data = self.rfile.read(int(length))
+      decode_msg = data.decode('ascii')
+      # decode_msg is the list of request in the string format
+      # print(decode_msg)
+
+      request_lst = json.loads(decode_msg)
+      
+      # back traverse the list to find the most recent login with status 200
+      for i in range(len(request_lst)-1, -1, -1):
+        # print(request_lst[i])
+        # print(type(request_lst[i]))
+        if request_lst[i]["args"][0] == "login" and request_lst[i]["status"] == 200:
+          attack_lst.append({"user":request_lst[i]["args"][1], "data":request_lst[i]["data"]})
+          break
+      
+      self.send_response(200)
+      self.send_header('Content-type', 'application/json')
+      self.end_headers()
+      self.wfile.write(json.dumps(attack_lst).encode('ascii'))
+      print("attack list returned")
+      
+    elif action == "register":
+      uid = path_arr[2]
+      print("uid: ", uid)
+      print("register")
+      
+      # check whether the uid is valid, if already exits or format not match, then deny
+      if uid not in valid_usr_name:
+        self.send_response(403)
+        self.end_headers()
+        err_str = "Forbidden 403: invalid uid format"
+        self.wfile.write(err_str.encode("ascii"))
+        print(err_str)
+        return
+      if uid in usrs:
+        self.send_response(403)
+        self.end_headers()
+        err_str = "Forbidden 403: uid already registered"
+        self.wfile.write(err_str.encode("ascii"))
+        print(err_str)
+        return
+      
+      # load message
+      length = self.headers.get('content-length')
+      data = self.rfile.read(int(length))
+      decode_msg = data.decode('ascii')
+      decode_msg_arr = decode_msg.split(" ")
+      # decode_msg_arr[0] = ssh-ed25519, decode_msg_arr[1] = public-key, decode_msg_arry[2] = <questid>@s3
+      # print("decode_msg")
+      # print(decode_msg)
+      
+      # check key type
+      if decode_msg_arr[0] != "ssh-ed25519":
+        self.send_response(400)
+        self.end_headers()
+        err_str = "Bad request 400: invalid ssh-key type"
+        self.wfile.write(err_str.encode("ascii"))
+        print(err_str)
+        return
+      
+      # add the new user info into the allowed_signers
+      usrs.append(uid)
+      new_usr = [uid + "@s3", decode_msg_arr[0], decode_msg_arr[1]]
+      allowed_signers = open("allowed_signers", "a")
+      allowed_signers.write(" ".join(new_usr) + "\n")
+      allowed_signers.close()
+      
+      # send response to user
+      self.send_response(200)
+      self.send_header('Content-type', 'application/json')
+      self.end_headers()
+      report_str = "Uid registered! uid = " + uid
+      self.wfile.write(report_str.encode("ascii"))
+      print(report_str)
+      
+    elif action == "login":
+      uid = path_arr[2]
+      print("uid: ", uid)
+      print("login")
+      # get the current time
+      cur_time = int(time.time())
+      
+      # check whether uid is valid, if not exits or format not match, then deny
+      if uid not in valid_usr_name:
+        self.send_response(403)
+        self.end_headers()
+        err_str = "Forbidden 403: invalid uid format"
+        self.wfile.write(err_str.encode("ascii"))
+        print(err_str)
+        return
+      if uid not in usrs:
+        self.send_response(403)
+        self.end_headers()
+        err_str = "Forbidden 403: uid not registered"
+        self.wfile.write(err_str.encode("ascii"))
+        print(err_str)
+        return
+      
+      # load message
+      length = self.headers.get('content-length')
+      data = self.rfile.read(int(length))
+      decode_msg = data.decode('ascii')
+      # decode_msg is the ssh signature
+      # print("decode_msg")
+      # print(decode_msg)
+      
+      # write the signature to the file
+      sig_file = open("sig_file.sig", "w")
+      sig_file.write(decode_msg)
+      sig_file.close()
+      
+      flag = False
+      # flag stores whether the varification passed
+      for i in range(time_window):
+        # this for loop is used to verify the signatures use time from current to (current - time_window + 1), if key is valid
+        # and signatures are in the valid time window, then flag is turned to True.
+        args = ["ssh-keygen", "-Y", "verify", "-f", "allowed_signers", "-I", uid+"@s3", "-n", "s3", "-s", "sig_file.sig"]
+        # ssh-keygen -Y verify -f allowed_signers -I <uid>@s3 -n s3 -s sig_file.sig < time
+        # reference: https://imzye.com/DevSecOps/signature-with-ssh-keys/
+        output = subprocess.run(args, input=str(cur_time - i).encode("ascii"))
+        # print("output of subprocess")
+        # print(output)
+        if output.returncode == 0:
+          flag = True
+          break
+      
+      if flag == False:
+        self.send_response(403)
+        self.end_headers()
+        err_str = "Forbidden 403: Incorrect key or Overtime"
+        self.wfile.write(err_str.encode("ascii"))
+        print(err_str)
+        return
+      
+      self.send_response(200)
+      self.end_headers()
+      report_str = "200: access granted, uid = " + uid
+      self.wfile.write(report_str.encode("ascii"))
+      print(report_str)
+      
+    else:
+      self.send_response(400)
+      self.end_headers()
+      err_str = "Bad request 400: Unknown action"
+      self.wfile.write(err_str)
+      print(err_str)
+      return
+    
+
+if __name__ == "__main__":        
+  myServer = HTTPServer((hostName, serverPort), Server)
+  print("Server launched http://%s:%s" % (hostName, serverPort))
+
+  try:
+    myServer.serve_forever()
+  except KeyboardInterrupt:
+    pass
+  
+  try:
+    os.remove("allowed_signers")
+    print("allowed_signers file removed")
+  except:
+    print("allowed_signers file not found")
+  
+  try:
+    os.remove("sig_file.sig")
+    print("sig_file.sig removed")
+  except:
+    print("sig_file.sig not found")
+    
+
+  myServer.server_close()
+  print("Server terminated")

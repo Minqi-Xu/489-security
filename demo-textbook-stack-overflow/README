@@ -1,0 +1,5 @@
+This demo is developed for educational purpose only
+
+- The code is developed on Ubuntu 22.04.2 LTS with proper installation of related tooling (e.g., build-essentials, python3, gdb).
+
+- It is highly advised that you try the code on a virtual machine instead of bare-metal. Use it at your own risk!
